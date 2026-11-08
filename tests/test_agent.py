@@ -40,3 +40,38 @@ def test_glossary_result_reaches_the_model():
         result = agent.run_sync("RAGとは？")
     returns = _parts(result, ToolReturnPart)
     assert returns and returns[0].tool_name == "search_glossary"
+
+
+
+# ---- 第3回 宿題（実装）: 保存は承認を待ってから実行される ----
+
+from pydantic_ai import DeferredToolResults, ToolDenied  # noqa: E402
+
+from app import tools  # noqa: E402
+
+
+def _ask_to_save(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools, "LOG_DIR", tmp_path / "learning_log")
+    with agent.override(model=TestModel(call_tools=["save_learning_log"])):
+        first = agent.run_sync("要点を学習ログに保存して")
+    return first
+
+
+def test_save_learning_log_waits_for_approval(tmp_path, monkeypatch):
+    first = _ask_to_save(tmp_path, monkeypatch)
+    assert isinstance(first.output, DeferredToolRequests)
+    assert [c.tool_name for c in first.output.approvals] == ["save_learning_log"]
+    assert not (tmp_path / "learning_log").exists()  # 承認前は書き込まれていない
+
+
+def test_save_learning_log_runs_only_when_approved(tmp_path, monkeypatch):
+    for approved, expected_files in [(ToolDenied("断りました"), 0), (True, 1)]:
+        first = _ask_to_save(tmp_path, monkeypatch)
+        call = first.output.approvals[0]
+        results = DeferredToolResults(approvals={call.tool_call_id: approved})
+        with agent.override(model=TestModel(call_tools=[])):
+            second = agent.run_sync(
+                message_history=first.all_messages(), deferred_tool_results=results
+            )
+        assert isinstance(second.output, str)
+        assert len(list((tmp_path / "learning_log").glob("*.md"))) == expected_files
